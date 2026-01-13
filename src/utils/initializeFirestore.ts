@@ -1,6 +1,7 @@
 import { collection, addDoc, getDocs } from 'firebase/firestore';
 import { db } from './firebaseConfig';
 import { sampleStudySpots } from '../data/sampleData';
+import { createInitialAdminUsers } from './createAdminUsers';
 
 export const initializeFirestore = async () => {
   try {
@@ -19,7 +20,11 @@ export const initializeFirestore = async () => {
       await Promise.all(addPromises);
       console.log('Study spots initialized successfully');
     }
+
+    // Create initial admin users
+    await createInitialAdminUsers();
+    
   } catch (error) {
-    console.error('Error initializing study spots:', error);
+    console.error('Error initializing Firestore:', error);
   }
 }; 

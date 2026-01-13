@@ -46,38 +46,67 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (email: string, password: string) => {
     try {
+      // For student login, validate domain
+      if (!email.endsWith('@bmsce.ac.in')) {
+        throw new Error('Only BMSCE email addresses (@bmsce.ac.in) are allowed');
+      }
+
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
+      
+      if (!userDoc.exists()) {
+        throw new Error('User account not found in database');
+      }
+
       const role = userDoc.data()?.role || 'student';
 
       setUser({
         uid: userCredential.user.uid,
         email: userCredential.user.email,
         displayName: userCredential.user.displayName || '',
-        role
+        role: role
       });
     } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
       throw new Error('Invalid credentials');
     }
   };
 
   const signup = async (email: string, password: string, name: string, role: string) => {
     try {
+      // Only allow student signup
+      if (role !== 'student') {
+        throw new Error('Admin accounts cannot be created through signup');
+      }
+
+      // Validate BMSCE domain for students
+      if (!email.endsWith('@bmsce.ac.in')) {
+        throw new Error('Only BMSCE email addresses (@bmsce.ac.in) are allowed for student registration');
+      }
+
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       await updateProfile(userCredential.user, { displayName: name });
 
-      // Save user role to Firestore
+      // Save complete user information to Firestore
       await setDoc(doc(db, 'users', userCredential.user.uid), {
-        role: role
+        role: 'student',
+        email: email,
+        name: name,
+        createdAt: new Date().toISOString()
       });
 
       setUser({
         uid: userCredential.user.uid,
         email: userCredential.user.email,
         displayName: name,
-        role: role as 'admin' | 'student'
+        role: 'student'
       });
     } catch (error) {
+      if (error instanceof Error) {
+        throw error;
+      }
       throw new Error('Error creating account');
     }
   };

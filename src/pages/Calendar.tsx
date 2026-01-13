@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Container,
   Typography,
@@ -14,6 +14,9 @@ import {
   TextField,
   MenuItem,
   Fade,
+  Chip,
+  Tooltip,
+  InputAdornment,
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -21,9 +24,12 @@ import {
   ChevronRight as ChevronRightIcon,
   Delete as DeleteIcon,
   DeleteSweep as DeleteSweepIcon,
+  Edit as EditIcon,
+  Search as SearchIcon,
+  Clear as ClearIcon,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths, startOfWeek, endOfWeek } from 'date-fns';
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths } from 'date-fns';
 import { styled } from '@mui/material/styles';
 import BackgroundGridComponent from '../components/BackgroundGrid';
 import { getEvents, addEvent, deleteEvent, updateEvent, cleanupPastEvents } from '../utils/firebaseServices';
@@ -203,41 +209,95 @@ const StyledButton = styled(Button)(({ theme }) => ({
   },
 }));
 
+type EventFormState = {
+  title: string;
+  type: 'academic' | 'cultural' | 'sports' | 'other';
+  description: string;
+  classroom: string;
+  registrationLink: string;
+  date: string;
+};
+
+const createEmptyEventForm = (date?: Date): EventFormState => ({
+  title: '',
+  type: 'academic',
+  description: '',
+  classroom: '',
+  registrationLink: '',
+  date: format(date ?? new Date(), 'yyyy-MM-dd'),
+});
+
+const EVENT_TYPES: EventFormState['type'][] = ['academic', 'cultural', 'sports', 'other'];
+
+const normalizeEventType = (type: string): EventFormState['type'] =>
+  (EVENT_TYPES.includes(type as EventFormState['type']) ? type : 'academic') as EventFormState['type'];
+
 const Calendar = () => {
   const [currentDate, setCurrentDate] = useState(new Date());
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const upcomingSectionRef = useRef<HTMLDivElement | null>(null);
   const [openDialog, setOpenDialog] = useState(false);
   const [events, setEvents] = useState<Event[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
   const [eventDetailsOpen, setEventDetailsOpen] = useState(false);
   const [eventFilter, setEventFilter] = useState<string>('all');
-  const [newEvent, setNewEvent] = useState({
-    title: '',
-    type: 'academic',
-    description: '',
-    classroom: '',
-    registrationLink: '',
-  });
+  const [eventForm, setEventForm] = useState<EventFormState>(createEmptyEventForm());
+  const [dialogMode, setDialogMode] = useState<'create' | 'edit'>('create');
+  const [searchQuery, setSearchQuery] = useState<string>('');
   const { isAdmin, isAuthenticated } = useAuth();
+  const isStudentView = !isAdmin;
 
   const monthStart = startOfMonth(currentDate);
   const monthEnd = endOfMonth(currentDate);
   const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
 
-  useEffect(() => {
-    const fetchEvents = async () => {
-      const eventsData = await getEvents();
-      setEvents(eventsData);
-    };
-    fetchEvents();
+  const refreshEvents = useCallback(async () => {
+    const eventsData = await getEvents();
+    setEvents(eventsData);
   }, []);
+
+  useEffect(() => {
+    refreshEvents();
+  }, [refreshEvents]);
+
+  const openCreateDialog = (date?: Date) => {
+    setDialogMode('create');
+    setSelectedEvent(null);
+    setEventForm(createEmptyEventForm(date));
+    setOpenDialog(true);
+  };
+
+  const openEditDialog = (event: Event) => {
+    setDialogMode('edit');
+    setSelectedEvent(event);
+    setEventForm({
+      title: event.title,
+      type: normalizeEventType(event.type),
+      description: event.description,
+      classroom: event.classroom || '',
+      registrationLink: event.registrationLink || '',
+      date: format(new Date(event.date), 'yyyy-MM-dd'),
+    });
+    setOpenDialog(true);
+  };
+
+  const handleDialogClose = () => {
+    setOpenDialog(false);
+    setDialogMode('create');
+    setEventForm(createEmptyEventForm());
+    setSelectedEvent(null);
+  };
 
   const handlePrevMonth = () => setCurrentDate(subMonths(currentDate, 1));
   const handleNextMonth = () => setCurrentDate(addMonths(currentDate, 1));
   const handleDateClick = (date: Date) => {
     if (isAdmin) {
-      setSelectedDate(date);
-      setOpenDialog(true);
+      openCreateDialog(date);
+      return;
+    }
+
+    const dayEvents = getEventsForDay(date);
+    if (dayEvents.length > 0) {
+      handleEventClick(dayEvents[0]);
     }
   };
 
@@ -250,9 +310,11 @@ const Calendar = () => {
     if (window.confirm('Are you sure you want to delete this event?')) {
       try {
         await deleteEvent(eventId);
-        // Refresh events
-        const updatedEvents = await getEvents();
-        setEvents(updatedEvents);
+        if (selectedEvent?.id === eventId) {
+          setEventDetailsOpen(false);
+          setSelectedEvent(null);
+        }
+        await refreshEvents();
       } catch (error) {
         console.error('Error deleting event:', error);
         // Add error handling UI here
@@ -265,9 +327,7 @@ const Calendar = () => {
       try {
         const deletedCount = await cleanupPastEvents();
         alert(`Successfully deleted ${deletedCount} past events.`);
-        // Refresh events
-        const updatedEvents = await getEvents();
-        setEvents(updatedEvents);
+        await refreshEvents();
       } catch (error) {
         console.error('Error cleaning up past events:', error);
         alert('Error cleaning up past events: ' + (error as Error).message);
@@ -275,52 +335,59 @@ const Calendar = () => {
     }
   };
 
-  const handleAddEvent = async () => {
-    if (selectedDate && newEvent.title) {
-      if (!isAuthenticated) {
-        alert('You must be logged in to add events.');
-        return;
-      }
+  const handleSaveEvent = async () => {
+    if (!eventForm.title.trim()) {
+      alert('Event title is required.');
+      return;
+    }
 
-      if (!isAdmin) {
-        alert('You must be an admin to add events.');
-        return;
-      }
+    if (!eventForm.date) {
+      alert('Please select a date for the event.');
+      return;
+    }
 
-      try {
-        const eventData = {
-          title: newEvent.title,
-          date: selectedDate,
-          type: newEvent.type as 'academic' | 'cultural' | 'sports' | 'other',
-          description: newEvent.description,
-          classroom: newEvent.classroom || '',
-          backgroundColor: getEventColor(newEvent.type),
-          registrationLink: newEvent.registrationLink || ''
-        };
+    if (!isAuthenticated) {
+      alert('You must be logged in to manage events.');
+      return;
+    }
 
-        console.log('Adding event:', eventData);
+    if (!isAdmin) {
+      alert('Only admins can manage events.');
+      return;
+    }
+
+    const eventDate = new Date(eventForm.date);
+    if (Number.isNaN(eventDate.getTime())) {
+      alert('Please provide a valid date.');
+      return;
+    }
+
+    const eventData: Omit<Event, 'id'> = {
+      title: eventForm.title.trim(),
+      date: eventDate,
+      type: eventForm.type,
+      description: eventForm.description,
+      classroom: eventForm.classroom || '',
+      backgroundColor: getEventColor(eventForm.type),
+      registrationLink: eventForm.registrationLink || ''
+    };
+
+    try {
+      if (dialogMode === 'edit' && selectedEvent?.id) {
+        await updateEvent(selectedEvent.id, eventData);
+      } else {
         await addEvent(eventData);
-
-        // Refresh events
-        const updatedEvents = await getEvents();
-        setEvents(updatedEvents);
-        console.log('Events refreshed, total events:', updatedEvents.length);
-
-        // Reset form
-        setOpenDialog(false);
-        setNewEvent({
-          title: '',
-          type: 'academic',
-          description: '',
-          classroom: '',
-          registrationLink: '',
-        });
-        setSelectedDate(null);
-        console.log('Form reset complete');
-      } catch (error) {
-        console.error('Error adding event:', error);
-        alert('Error adding event: ' + (error as Error).message);
       }
+
+      await refreshEvents();
+
+      setOpenDialog(false);
+      setSelectedEvent(null);
+      setEventForm(createEmptyEventForm());
+      setDialogMode('create');
+    } catch (error) {
+      console.error('Error saving event:', error);
+      alert('Error saving event: ' + (error as Error).message);
     }
   };
 
@@ -333,9 +400,24 @@ const Calendar = () => {
         return '#2e7d32';
       case 'seminar':
         return '#ed6c02';
+      case 'cultural':
+        return '#ab47bc';
+      case 'sports':
+        return '#ef5350';
+      case 'other':
+        return '#00897b';
       default:
         return '#1976d2';
     }
+  };
+
+  const getEventChipStyles = (type: string) => {
+    const color = getEventColor(type);
+    return {
+      backgroundColor: `${color}33`,
+      borderColor: `${color}66`,
+      color: '#fff',
+    };
   };
 
   const getEventsForDay = (date: Date) => {
@@ -347,18 +429,36 @@ const Calendar = () => {
     );
   };
 
-  const getFilteredEvents = () => {
+  const filteredEvents = useMemo(() => {
     const now = new Date();
-    now.setHours(0, 0, 0, 0); // Set to start of today
+    now.setHours(0, 0, 0, 0);
 
     let filtered = events.filter(event => new Date(event.date) >= now);
 
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase().trim();
+      filtered = filtered.filter(event => 
+        event.title.toLowerCase().includes(query) ||
+        event.description.toLowerCase().includes(query) ||
+        event.type.toLowerCase().includes(query) ||
+        (event.classroom && event.classroom.toLowerCase().includes(query))
+      );
+    }
+    
+    // Apply event type filter
     if (eventFilter !== 'all') {
       filtered = filtered.filter(event => event.type === eventFilter);
     }
 
-    return filtered.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  };
+    return filtered.sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+  }, [events, eventFilter, searchQuery]);
+
+  const upcomingCount = filteredEvents.length;
+  const nextEvent = filteredEvents[0];
+  const studentHighlightChips = ['Hackathons', 'Workshops', 'Sports Fests', 'Seminars'];
 
   return (
     <>
@@ -384,6 +484,124 @@ const Calendar = () => {
             >
               Event Calendar
             </Typography>
+
+            {isAdmin ? (
+              <StyledPaper sx={{ p: 3, mb: 3 }}>
+                <Typography variant="h6" sx={{ color: '#fff', fontWeight: 600 }}>
+                  Admin Control Center
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ color: 'rgba(255, 255, 255, 0.7)', mt: 1 }}
+                >
+                  Create, edit, or purge events directly from here. Click any calendar day to schedule something new.
+                </Typography>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mt: 2 }}>
+                  <StyledButton
+                    startIcon={<AddIcon />}
+                    onClick={() => openCreateDialog()}
+                  >
+                    Add Event
+                  </StyledButton>
+                  <Tooltip title="Remove every past event in a single action">
+                    <Button
+                      variant="outlined"
+                      startIcon={<DeleteSweepIcon />}
+                      onClick={handleCleanupPastEvents}
+                      sx={{
+                        color: '#f44336',
+                        borderColor: 'rgba(244, 67, 54, 0.7)',
+                        '&:hover': {
+                          borderColor: '#f44336',
+                          background: 'rgba(244, 67, 54, 0.1)',
+                        },
+                      }}
+                    >
+                      Clean Past Events
+                    </Button>
+                  </Tooltip>
+                </Box>
+                <Typography
+                  variant="caption"
+                  sx={{
+                    display: 'block',
+                    mt: 2,
+                    color: 'rgba(255, 255, 255, 0.6)',
+                  }}
+                >
+                  Tip: Select any date tile to prefill the scheduler or hit “Add Event” for manual entry.
+                </Typography>
+              </StyledPaper>
+            ) : (
+              <StyledPaper
+                sx={{
+                  p: 3,
+                  mb: 3,
+                  background:
+                    'linear-gradient(135deg, rgba(33,150,243,0.25), rgba(156,39,176,0.2))',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                }}
+              >
+                <Typography variant="h5" sx={{ fontWeight: 600, mb: 1 }}>
+                  Hey BMSCE!
+                </Typography>
+                <Typography
+                  variant="body1"
+                  sx={{ color: 'rgba(255, 255, 255, 0.8)', mb: 2 }}
+                >
+                  {upcomingCount > 0
+                    ? `There ${upcomingCount === 1 ? 'is' : 'are'} ${upcomingCount} exciting event${upcomingCount === 1 ? '' : 's'} coming up soon.`
+                    : 'No events on the radar yet. Check back for fresh announcements!'}
+                </Typography>
+                {nextEvent && (
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: '12px',
+                      background: 'rgba(10, 25, 41, 0.65)',
+                      border: '1px solid rgba(255, 255, 255, 0.08)',
+                      mb: 2,
+                    }}
+                  >
+                    <Typography variant="subtitle2" sx={{ color: '#64b5f6', mb: 0.5 }}>
+                      Next highlight
+                    </Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                      {nextEvent.title}
+                    </Typography>
+                    <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.7)' }}>
+                      {format(new Date(nextEvent.date), 'PPP')} • {nextEvent.type}
+                    </Typography>
+                  </Box>
+                )}
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                  {studentHighlightChips.map((chip) => (
+                    <Chip
+                      key={chip}
+                      label={chip}
+                      sx={{
+                        color: '#fff',
+                        borderColor: 'rgba(255, 255, 255, 0.3)',
+                        backgroundColor: 'transparent',
+                        '&:hover': {
+                          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+                        },
+                      }}
+                      variant="outlined"
+                    />
+                  ))}
+                </Box>
+                <Button
+                  variant="contained"
+                  sx={{ mt: 2, textTransform: 'none' }}
+                  onClick={() =>
+                    upcomingSectionRef.current?.scrollIntoView({ behavior: 'smooth' })
+                  }
+                >
+                  Browse upcoming events
+                </Button>
+              </StyledPaper>
+            )}
 
             <StyledPaper sx={{ p: 3 }}>
               <CalendarHeader>
@@ -419,17 +637,69 @@ const Calendar = () => {
                     </IconButton>
                   </Box>
                 </Box>
-                {isAdmin && (
-                  <StyledButton
-                    startIcon={<AddIcon />}
-                    onClick={() => {
-                      setSelectedDate(new Date());
-                      setOpenDialog(true);
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                  <TextField
+                    placeholder="Search events..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon sx={{ color: 'rgba(255, 255, 255, 0.5)' }} />
+                        </InputAdornment>
+                      ),
+                      endAdornment: searchQuery && (
+                        <InputAdornment position="end">
+                          <IconButton
+                            size="small"
+                            onClick={() => setSearchQuery('')}
+                            sx={{ color: 'rgba(255, 255, 255, 0.5)' }}
+                          >
+                            <ClearIcon />
+                          </IconButton>
+                        </InputAdornment>
+                      )
                     }}
-                  >
-                    Add Event
-                  </StyledButton>
-                )}
+                    sx={{
+                      minWidth: 250,
+                      '& .MuiOutlinedInput-root': {
+                        color: '#fff',
+                        backgroundColor: 'rgba(255, 255, 255, 0.05)',
+                        borderRadius: '8px',
+                        '& fieldset': {
+                          borderColor: 'rgba(255, 255, 255, 0.2)',
+                        },
+                        '&:hover fieldset': {
+                          borderColor: 'rgba(255, 255, 255, 0.3)',
+                        },
+                        '&.Mui-focused fieldset': {
+                          borderColor: '#2196f3',
+                        },
+                      },
+                      '& .MuiInputLabel-root': {
+                        color: 'rgba(255, 255, 255, 0.7)',
+                        '&.Mui-focused': {
+                          color: '#2196f3',
+                        },
+                      },
+                    }}
+                  />
+                  {isAdmin ? (
+                    <StyledButton
+                      startIcon={<AddIcon />}
+                      onClick={() => openCreateDialog(new Date())}
+                    >
+                      Add Event
+                    </StyledButton>
+                  ) : (
+                    <Typography
+                      variant="body2"
+                      sx={{ color: 'rgba(255, 255, 255, 0.7)', textAlign: 'right' }}
+                    >
+                      Tap a date tile to peek into day.
+                    </Typography>
+                  )}
+                </Box>
               </CalendarHeader>
 
               <Box sx={{ mb: 2 }}>
@@ -456,10 +726,6 @@ const Calendar = () => {
               </Box>
 
               <CalendarGrid>
-                {[...Array(monthStart.getDay())].map((_, index) => (
-                  <CalendarDay key={`empty-${index}`} />
-                ))}
-
                 {days.map((day: Date, index: number) => {
                   const dayEvents = getEventsForDay(day);
                   return (
@@ -502,7 +768,7 @@ const Calendar = () => {
 
       <Dialog
         open={openDialog}
-        onClose={() => setOpenDialog(false)}
+        onClose={handleDialogClose}
         PaperProps={{
           sx: {
             background: 'rgba(10, 25, 41, 0.95)',
@@ -512,14 +778,44 @@ const Calendar = () => {
           }
         }}
       >
-        <DialogTitle sx={{ color: '#fff' }}>Add New Event</DialogTitle>
+        <DialogTitle sx={{ color: '#fff' }}>
+          {dialogMode === 'edit' ? 'Update Event' : 'Add New Event'}
+        </DialogTitle>
         <DialogContent>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}>
             <TextField
               label="Event Title"
               fullWidth
-              value={newEvent.title}
-              onChange={(e) => setNewEvent({ ...newEvent, title: e.target.value })}
+              value={eventForm.title}
+              onChange={(e) => setEventForm({ ...eventForm, title: e.target.value })}
+              sx={{
+                '& .MuiOutlinedInput-root': {
+                  color: '#fff',
+                  '& fieldset': {
+                    borderColor: 'rgba(255, 255, 255, 0.2)',
+                  },
+                  '&:hover fieldset': {
+                    borderColor: 'rgba(255, 255, 255, 0.3)',
+                  },
+                  '&.Mui-focused fieldset': {
+                    borderColor: '#2196f3',
+                  },
+                },
+                '& .MuiInputLabel-root': {
+                  color: 'rgba(255, 255, 255, 0.7)',
+                  '&.Mui-focused': {
+                    color: '#2196f3',
+                  },
+                },
+              }}
+            />
+            <TextField
+              label="Event Date"
+              type="date"
+              fullWidth
+              value={eventForm.date}
+              onChange={(e) => setEventForm({ ...eventForm, date: e.target.value })}
+              InputLabelProps={{ shrink: true }}
               sx={{
                 '& .MuiOutlinedInput-root': {
                   color: '#fff',
@@ -546,8 +842,8 @@ const Calendar = () => {
               multiline
               rows={3}
               fullWidth
-              value={newEvent.description}
-              onChange={(e) => setNewEvent({ ...newEvent, description: e.target.value })}
+              value={eventForm.description}
+              onChange={(e) => setEventForm({ ...eventForm, description: e.target.value })}
               sx={{
                 '& .MuiOutlinedInput-root': {
                   color: '#fff',
@@ -573,8 +869,8 @@ const Calendar = () => {
               label="Registration Link (Optional)"
               placeholder="https://example.com/registration-form"
               fullWidth
-              value={newEvent.registrationLink}
-              onChange={(e) => setNewEvent({ ...newEvent, registrationLink: e.target.value })}
+              value={eventForm.registrationLink}
+              onChange={(e) => setEventForm({ ...eventForm, registrationLink: e.target.value })}
               sx={{
                 '& .MuiOutlinedInput-root': {
                   color: '#fff',
@@ -600,8 +896,13 @@ const Calendar = () => {
               select
               label="Event Type"
               fullWidth
-              value={newEvent.type}
-              onChange={(e) => setNewEvent({ ...newEvent, type: e.target.value })}
+              value={eventForm.type}
+              onChange={(e) =>
+                setEventForm({
+                  ...eventForm,
+                  type: normalizeEventType(e.target.value),
+                })
+              }
               sx={{
                 '& .MuiOutlinedInput-root': {
                   color: '#fff',
@@ -623,16 +924,17 @@ const Calendar = () => {
                 },
               }}
             >
-              <MenuItem value="academic">Academic</MenuItem>
-              <MenuItem value="cultural">Cultural</MenuItem>
-              <MenuItem value="sports">Sports</MenuItem>
-              <MenuItem value="other">Other</MenuItem>
+              {EVENT_TYPES.map((type) => (
+                <MenuItem key={type} value={type}>
+                  {type.charAt(0).toUpperCase() + type.slice(1)}
+                </MenuItem>
+              ))}
             </TextField>
             <TextField
               label="Classroom (Optional)"
               fullWidth
-              value={newEvent.classroom}
-              onChange={(e) => setNewEvent({ ...newEvent, classroom: e.target.value })}
+              value={eventForm.classroom}
+              onChange={(e) => setEventForm({ ...eventForm, classroom: e.target.value })}
               sx={{
                 '& .MuiOutlinedInput-root': {
                   color: '#fff',
@@ -658,7 +960,7 @@ const Calendar = () => {
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button
-            onClick={() => setOpenDialog(false)}
+            onClick={handleDialogClose}
             sx={{
               color: 'rgba(255, 255, 255, 0.7)',
               '&:hover': { color: '#fff' }
@@ -666,8 +968,8 @@ const Calendar = () => {
           >
             Cancel
           </Button>
-          <StyledButton onClick={handleAddEvent} disabled={!newEvent.title}>
-            Add Event
+          <StyledButton onClick={handleSaveEvent} disabled={!eventForm.title}>
+            {dialogMode === 'edit' ? 'Save Changes' : 'Add Event'}
           </StyledButton>
         </DialogActions>
       </Dialog>
@@ -776,6 +1078,36 @@ const Calendar = () => {
           </Box>
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
+          {isAdmin && selectedEvent?.id && (
+            <>
+              <Button
+                onClick={() => {
+                  setEventDetailsOpen(false);
+                  openEditDialog(selectedEvent);
+                }}
+                sx={{
+                  color: '#4caf50',
+                  textTransform: 'none',
+                  '&:hover': { color: '#81c784' },
+                }}
+              >
+                Edit
+              </Button>
+              <Button
+                onClick={() => {
+                  setEventDetailsOpen(false);
+                  handleDeleteEvent(selectedEvent.id!);
+                }}
+                sx={{
+                  color: '#f44336',
+                  textTransform: 'none',
+                  '&:hover': { color: '#ff7961' },
+                }}
+              >
+                Delete
+              </Button>
+            </>
+          )}
           <Button
             onClick={() => setEventDetailsOpen(false)}
             sx={{
@@ -798,7 +1130,7 @@ const Calendar = () => {
         }}
       >
         <Fade in timeout={1000}>
-          <Box>
+          <Box ref={upcomingSectionRef}>
             <Typography
               variant="h4"
               gutterBottom
@@ -901,7 +1233,7 @@ const Calendar = () => {
             </Box>
 
             <StyledPaper sx={{ p: 3 }}>
-              {getFilteredEvents().length === 0 ? (
+              {filteredEvents.length === 0 ? (
                 <Typography
                   variant="body1"
                   sx={{
@@ -914,7 +1246,7 @@ const Calendar = () => {
                 </Typography>
               ) : (
                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                  {getFilteredEvents().map((event) => (
+                  {filteredEvents.map((event) => (
                       <Box
                         key={event.id}
                         sx={{
@@ -935,17 +1267,73 @@ const Calendar = () => {
                         }}
                         onClick={() => handleEventClick(event)}
                       >
-                        <Box sx={{ flex: 1 }}>
-                          <Typography
-                            variant="h6"
+                        <Box sx={{ flex: 1, pr: 2 }}>
+                          <Box
                             sx={{
-                              color: '#fff',
-                              fontWeight: 600,
-                              mb: 1
+                              display: 'flex',
+                              alignItems: 'flex-start',
+                              justifyContent: 'space-between',
+                              gap: 1,
+                              mb: 1,
                             }}
                           >
-                            {event.title}
-                          </Typography>
+                            <Typography
+                              variant="h6"
+                              sx={{
+                                color: '#fff',
+                                fontWeight: 600,
+                              }}
+                            >
+                              {event.title}
+                            </Typography>
+                            {isAdmin ? (
+                              <Box sx={{ display: 'flex', gap: 0.5 }}>
+                                <Tooltip title="Edit event">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openEditDialog(event);
+                                    }}
+                                    sx={{
+                                      color: 'rgba(255, 255, 255, 0.7)',
+                                      '&:hover': { color: '#4caf50' },
+                                    }}
+                                  >
+                                    <EditIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                <Tooltip title="Delete event">
+                                  <IconButton
+                                    size="small"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteEvent(event.id!);
+                                    }}
+                                    sx={{
+                                      color: 'rgba(255, 255, 255, 0.5)',
+                                      '&:hover': {
+                                        color: '#f44336',
+                                        background: 'rgba(244, 67, 54, 0.1)',
+                                      },
+                                    }}
+                                  >
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
+                            ) : (
+                              <Chip
+                                label={event.type}
+                                size="small"
+                                variant="outlined"
+                                sx={{
+                                  ...getEventChipStyles(event.type),
+                                  textTransform: 'capitalize',
+                                }}
+                              />
+                            )}
+                          </Box>
                           <Typography
                             variant="body2"
                             sx={{
@@ -1021,23 +1409,6 @@ const Calendar = () => {
                             </Box>
                           )}
                         </Box>
-                        {isAdmin && (
-                          <IconButton
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteEvent(event.id!);
-                            }}
-                            sx={{
-                              color: 'rgba(255, 255, 255, 0.5)',
-                              '&:hover': {
-                                color: '#f44336',
-                                background: 'rgba(244, 67, 54, 0.1)'
-                              }
-                            }}
-                          >
-                            <DeleteIcon />
-                          </IconButton>
-                        )}
                       </Box>
                     ))}
                 </Box>

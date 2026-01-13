@@ -76,7 +76,13 @@ export const addEvent = async (eventData: Omit<Event, 'id'>) => {
 
 export const updateEvent = async (eventId: string, data: Partial<Event>) => {
   const eventRef = doc(db, 'events', eventId);
-  await updateDoc(eventRef, data);
+  const updatePayload: Record<string, unknown> = { ...data };
+
+  if (data.date instanceof Date) {
+    updatePayload.date = Timestamp.fromDate(data.date);
+  }
+
+  await updateDoc(eventRef, updatePayload as { [x: string]: any });
 };
 
 export const deleteEvent = async (eventId: string) => {

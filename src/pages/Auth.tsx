@@ -172,7 +172,7 @@ const Auth = () => {
     email: '',
     password: '',
     name: '',
-    role: 'student' as 'student' | 'admin',
+    role: 'student' as 'student',
   });
 
   const handleTabChange = (event: React.SyntheticEvent, newValue: number) => {
@@ -185,7 +185,7 @@ const Auth = () => {
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
-  const handleSelectChange = (e: SelectChangeEvent<'student' | 'admin'>) => {
+  const handleSelectChange = (e: SelectChangeEvent<'student'>) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
@@ -215,13 +215,28 @@ const Auth = () => {
     }
   };
 
+  const validateEmail = (email: string) => {
+    if (!email.endsWith('@bmsce.ac.in')) {
+      return 'Only BMSCE email addresses (@bmsce.ac.in) are allowed';
+    }
+    return '';
+  };
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    const emailError = validateEmail(formData.email);
+    if (emailError) {
+      setError(emailError);
+      return;
+    }
+    
     const passwordError = validatePassword(formData.password);
     if (passwordError) {
       setError(passwordError);
       return;
     }
+    
     try {
       await signup(formData.email, formData.password, formData.name, formData.role);
       navigate('/');
@@ -325,6 +340,7 @@ const Auth = () => {
                 required
                 variant="outlined"
                 autoComplete="email"
+                helperText="Only BMSCE email addresses (@bmsce.ac.in) are allowed"
               />
               <StyledTextField
                 fullWidth
@@ -352,31 +368,6 @@ const Auth = () => {
                   ),
                 }}
               />
-              <FormControl fullWidth margin="normal">
-                <InputLabel sx={{ color: 'rgba(255, 255, 255, 0.7)' }}>Role</InputLabel>
-                <Select
-                  name="role"
-                  value={formData.role}
-                  onChange={handleSelectChange}
-                  label="Role"
-                  variant="outlined"
-                  sx={{
-                    color: '#fff',
-                    '& .MuiOutlinedInput-notchedOutline': {
-                      borderColor: 'rgba(255, 255, 255, 0.2)',
-                    },
-                    '&:hover .MuiOutlinedInput-notchedOutline': {
-                      borderColor: 'rgba(255, 255, 255, 0.3)',
-                    },
-                    '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                      borderColor: '#2196f3',
-                    },
-                  }}
-                >
-                  <MenuItem value="student">Student</MenuItem>
-                  <MenuItem value="admin">Admin (Professor/Class Rep/Club Secretary)</MenuItem>
-                </Select>
-              </FormControl>
               <StyledButton type="submit" fullWidth sx={{ mt: 3 }}>
                 Sign Up
               </StyledButton>
